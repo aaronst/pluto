@@ -1,0 +1,29 @@
+Login {
+    align: center middle;
+    height: 100%;
+    width: 100%;
+}
+
+#welcome {
+    background: $panel;
+    border: double $secondary;
+    margin: 1;
+    padding: 1 2;
+    text-align: center;
+    width: auto;
+}
+
+#url {
+    margin: 1;
+    min-width: 40;
+    width: auto;
+}
+
+Storm {
+    height: 100%;
+    width: 100%;
+}
+
+#nodes {
+    width: 100%;
+}
