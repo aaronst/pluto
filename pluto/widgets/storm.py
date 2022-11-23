@@ -18,6 +18,7 @@ limitations under the License.
 """
 
 
+from collections import deque
 from datetime import datetime
 from json import dumps
 from typing import Any
@@ -25,6 +26,7 @@ from typing import Any
 from synapse.cortex import CoreApi
 from textual.app import ComposeResult
 from textual.containers import Content, Vertical
+from textual.events import Key
 from textual.message import Message, MessageTarget
 from textual.widgets import DataTable, Input, Static
 
@@ -71,6 +73,37 @@ class Summary(Static):
         self.update(f"[b]{fini['count']}[/] in [i]{fini['took'] / 1000.0:.2f}s")
 
 
+class Query(Input):
+    """A widget for inputting storm commands and queries."""
+
+    class Submitted(Message):
+        """Input submitted."""
+
+        def __init__(self, sender: MessageTarget, query: str) -> None:
+            self.query = query
+            super().__init__(sender)
+
+    def __init__(self, *args, max_history: int = 1000, **kwargs) -> None:
+        self.history = deque(maxlen=max_history)
+        self.history_index = 0
+        super().__init__(*args, **kwargs)
+
+    async def on_key(self, event: Key) -> None:
+        """Key pressed."""
+
+        if event.key == "down":
+            if self.history_index > 0:
+                self.history_index -= 1
+        elif event.key == "up":
+            if self.history_index < len(self.history) - 1:
+                self.history_index += 1
+        else:
+            return
+
+        self.value = self.history[self.history_index]
+        self.cursor_position = len(self.value)
+
+
 class QueryBar(Static):
     """A widget for Storm query input and results summary."""
 
@@ -90,11 +123,20 @@ class QueryBar(Static):
     def compose(self) -> ComposeResult:
         """Create child widgets."""
 
-        yield Input(id="query", placeholder="storm>")
+        yield Query(id="query", placeholder="storm>")
         yield Summary(id="summary", markup=True)
 
-    async def on_input_submitted(self, message: Input.Submitted) -> None:
-        """User input submitted."""
+    async def on_query_submitted(self, message: Query.Submitted) -> None:
+        """Storm query submitted."""
+
+        query = self.get_child_by_id("query")
+        assert isinstance(query, Query)
+        query.history_index = 0
+
+        if not query.history:
+            query.history.append(message.query)
+        elif message.query != query.history[0]:
+            query.history.appendleft(message.query)
 
         summary = self.get_child_by_id("summary")
         assert isinstance(summary, Static)
@@ -102,7 +144,7 @@ class QueryBar(Static):
         summary.add_class("running")
         summary.update("[i]running...")
 
-        await self.emit(self.Submitted(self, message.value))
+        await self.emit(self.Submitted(self, message.query))
 
     def on_mount(self) -> None:
         """Focus on Input."""
@@ -193,12 +235,12 @@ class Console(Content):
         time = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
 
         for line in [f"{time} - {line}" for line in text.splitlines()]:
-            self.mount(Static(line, id=str(self.lines)))
+            self.mount(Static(line, id=f"line-{self.lines}"))
 
             self.lines += 1
 
             if self.lines - self.first == self.limit:
-                self.get_child_by_id(str(self.first)).remove()
+                self.get_child_by_id(f"line-{self.first}").remove()
                 self.first += 1
 
         self.scroll_end(animate=False)
@@ -248,8 +290,6 @@ class Storm(Static):
         async for message_type, message_data in self.core.storm(
             message.query, opts={"repr": True}
         ):
-            console.print(dumps((message_type, message_data)))
-
             if message_type == "node":
                 buffer.append(message_data)
 

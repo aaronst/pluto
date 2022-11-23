@@ -57,11 +57,7 @@ class Login(Static):
     async def on_input_submitted(self, message: Input.Submitted) -> None:
         """Event handler for the url submission."""
 
-        # stop message from bubbling to parent
-        message.stop()
-
         # remove login widget from the dom
         self.remove()
-
         # emit our own special submitted message
         await self.emit(self.Submitted(self, message.value))
