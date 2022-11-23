@@ -18,11 +18,13 @@ limitations under the License.
 """
 
 
+from datetime import datetime
 from json import dumps
+from typing import Any
 
-from synapse.telepath import Proxy
+from synapse.cortex import CoreApi
 from textual.app import ComposeResult
-from textual.css.query import NoMatches
+from textual.containers import Content, Vertical
 from textual.message import Message, MessageTarget
 from textual.widgets import DataTable, Input, Static
 
@@ -32,27 +34,41 @@ class Summary(Static):
 
     DEFAULT_CSS = """
     Summary {
+        color: $text-disabled;
         content-align: center middle;
-        height: 3;
-        width: 30;
+        height: auto;
+        padding: 1 2 0 2;
+        width: 100%;
     }
 
-    Summary .success {
-        border: round $success;
-        color: $success;
+    Summary.running {
+        border-bottom: hkey $accent;
     }
 
-    Summary .error {
-        border: round $error;
+    Summary.error {
+        border-bottom: hkey $error;
         color: $error;
     }
+
+    Summary.success {
+        border-bottom: hkey $success;
+        color: $success;
+    }
     """
+
+    def error(self, err: tuple[str, dict]) -> None:
+        """Set content based on a given err message."""
+
+        self.remove_class("running")
+        self.add_class("error")
+        self.update(f"[b i]{err[0]}[/]: {err[1]['mesg']}")
 
     def success(self, fini: dict) -> None:
         """Set content based on a given fini message."""
 
+        self.remove_class("running")
         self.add_class("success")
-        self.update(f"{fini['count']} in {fini['took'] / 1000.0:.2f}s")
+        self.update(f"[b]{fini['count']}[/] in [i]{fini['took'] / 1000.0:.2f}s")
 
 
 class QueryBar(Static):
@@ -61,11 +77,6 @@ class QueryBar(Static):
     DEFAULT_CSS = """
     QueryBar {
         dock: top;
-        layout: horizontal;
-    }
-
-    QueryBar > #query {
-        width: 1fr;
     }
     """
 
@@ -79,28 +90,131 @@ class QueryBar(Static):
     def compose(self) -> ComposeResult:
         """Create child widgets."""
 
-        yield Input(placeholder="storm>", id="query")
-        yield Summary(id="summary")
+        yield Input(id="query", placeholder="storm>")
+        yield Summary(id="summary", markup=True)
 
     async def on_input_submitted(self, message: Input.Submitted) -> None:
         """User input submitted."""
 
-        summary = self.query_one(Summary)
+        summary = self.get_child_by_id("summary")
+        assert isinstance(summary, Static)
         summary.remove_class("error", "success")
-        summary.update("running...")
+        summary.add_class("running")
+        summary.update("[i]running...")
 
         await self.emit(self.Submitted(self, message.value))
 
     def on_mount(self) -> None:
         """Focus on Input."""
 
-        self.query_one(Input).focus()
+        self.get_child_by_id("query").focus()
+
+
+# type alias for packed nodes
+NodeType = tuple[tuple[str, int], dict[str, Any]]
+
+
+class Nodes(Vertical):
+    """A widget for displaying Synapse nodes."""
+
+    DEFAULT_CSS = """
+    Nodes {
+        padding: 1 0 1 1;
+    }
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.tables = {}
+
+    def add_nodes(self, *nodes: NodeType) -> None:
+        """Add nodes to their respective tables."""
+
+        sorted_nodes = {}
+
+        for node in nodes:
+            # unpack the node
+            (form, _), data = node
+            row = (data["repr"],)
+
+            try:
+                sorted_nodes[form].append(row)
+            except KeyError:
+                sorted_nodes[form] = [row]
+
+        for form, rows in sorted_nodes.items():
+            # get the associated table or create one if it doesn't exist
+            try:
+                table = self.tables[form]
+            except KeyError:
+                table = DataTable()
+                table.add_column(form)
+                table.zebra_stripes = True
+                self.tables[form] = table
+                self.mount(table)
+
+            # add rows to the table
+            table.add_rows(rows)
+
+    def clear(self) -> None:
+        """Remove all tables."""
+
+        for table in self.tables.values():
+            table.remove()
+
+        self.tables.clear()
+
+
+class Console(Content):
+    """A widget to display messages."""
+
+    DEFAULT_CSS = """
+    Console {
+        background: $background;
+        border-top: tall $accent;
+        color: $text-disabled;
+        dock: bottom;
+        height: auto;
+        max-height: 30%;
+        overflow-y: auto;
+        padding: 0 1 1 1;
+    }
+    """
+
+    def __init__(self, *args, limit: int = 1000, **kwargs) -> None:
+        self.first = 0
+        self.limit = limit
+        self.lines = 0
+        super().__init__(*args, **kwargs)
+
+    def print(self, text: str) -> None:
+        """Add content and scroll to the bottom."""
+
+        time = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+
+        for line in [f"{time} - {line}" for line in text.splitlines()]:
+            self.mount(Static(line, id=str(self.lines)))
+
+            self.lines += 1
+
+            if self.lines - self.first == self.limit:
+                self.get_child_by_id(str(self.first)).remove()
+                self.first += 1
+
+        self.scroll_end(animate=False)
 
 
 class Storm(Static):
     """A widget to submit Storm queries and view results."""
 
-    def __init__(self, core: Proxy, *args, **kwargs) -> None:
+    DEFAULT_CSS = """
+    Storm {
+        height: 100%;
+        width: 100%;
+    }
+    """
+
+    def __init__(self, core: CoreApi, *args, **kwargs) -> None:
         """Initialize this instance."""
 
         self.core = core
@@ -110,35 +224,61 @@ class Storm(Static):
         """Create child widgets."""
 
         yield QueryBar(id="query-bar")
+        yield Nodes(id="nodes")
+        yield Console(id="console")
 
     async def on_query_bar_submitted(self, message: QueryBar.Submitted) -> None:
         """Handle a submitted Storm query."""
 
-        try:
-            self.query_one("#nodes").remove()
-        except NoMatches:
-            pass
+        # whether previous data has been cleared
+        cleared = False
 
-        nodes = DataTable(id="nodes")
-        nodes.add_columns("node")
+        nodes = self.get_child_by_id("nodes")
+        assert isinstance(nodes, Nodes)
+        summary = self.get_widget_by_id("summary")
+        assert isinstance(summary, Summary)
+        console = self.get_child_by_id("console")
+        assert isinstance(console, Console)
 
-        i = 0
-        rows = []
+        # buffer 100 nodes at a time
+        # TODO: is there an optimal number here?
+        buffer = []
+        limit = 100
 
-        async for message_type, message_data in self.core.storm(message.query):
+        async for message_type, message_data in self.core.storm(
+            message.query, opts={"repr": True}
+        ):
+            console.print(dumps((message_type, message_data)))
+
             if message_type == "node":
-                i += 1
-                rows.append((dumps(message_data, indent=None),))
+                buffer.append(message_data)
 
-                if i % 100 == 0:
-                    nodes.add_rows(rows)
-                    rows.clear()
+                if len(buffer) == limit:
+                    if not cleared:
+                        # clear existing nodes
+                        nodes.clear()
+                        cleared = True
+
+                    nodes.add_nodes(*buffer)
+                    buffer.clear()
+
+            elif message_type == "err":
+                summary.error(message_data)
+                break
 
             elif message_type == "fini":
-                summary = self.query_one(Summary)
                 summary.success(message_data)
 
-        if rows:
-            nodes.add_rows(rows)
+            elif message_type == "print":
+                console.print(message_data["mesg"])
 
-        await self.mount(nodes)
+            else:
+                console.print(dumps((message_type, message_data)))
+
+        # add any remaining nodes
+        if buffer:
+            if not cleared:
+                # clear existing nodes
+                nodes.clear()
+
+            nodes.add_nodes(*buffer)

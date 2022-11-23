@@ -47,7 +47,6 @@ class Login(Static):
         yield Input(
             id="url",
             placeholder="aha://user@cortex.domain.com",
-            value="aha://aaron@cortex.graph.money",
         )
 
     def on_mount(self) -> None:
